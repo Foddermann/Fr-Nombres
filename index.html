@@ -146,6 +146,11 @@
         <button class="secondary danger" id="resetBtn">Trainingsdaten zurücksetzen</button>
       </div>
 
+      <div class="sectiontitle"><h3>Systemprüfung</h3><small>Version 1.1</small></div>
+      <div class="panel">
+        <div class="row"><div><label>Frage-Antwort-Integrität</label><small id="integrityDetail">Prüfung läuft …</small></div><b id="integrityStatus">…</b></div>
+      </div>
+
       <div class="sectiontitle"><h3>Lernlogik</h3></div>
       <div class="panel footnote">
         <p><b>Aktiver Abruf:</b> Lösungen werden nicht nur gelesen, sondern möglichst selbst produziert. Grundlage: Karpicke &amp; Roediger (2008), <i>Science</i>, DOI 10.1126/science.1152408.</p>
@@ -174,6 +179,11 @@
     {id:3, title:'Ordnungszahlen', desc:'premier, deuxième … bis zum 100.'},
     {id:4, title:'Hören & Verstehen', desc:'Französische Zahl hören und als Ziffer erkennen'},
     {id:5, title:'Alltag & Transfer', desc:'Preise, Uhrzeiten, Jahre, Zimmer, Linien und Telefon'}
+  ];
+
+  const PHONE_PAIRS = [
+    '06 12 34 56 78','01 42 75 80 91','07 21 31 41 51','09 60 70 80 90','01 23 45 67 89',
+    '06 11 22 33 44','07 55 66 77 88','01 10 20 30 40','06 61 71 81 91','09 19 29 39 49'
   ];
 
   const defaultState = () => ({
@@ -235,6 +245,13 @@
     if(r===0) return base;
     return base+' '+under1000(r,true);
   }
+  function phoneGroupToFrench(group){
+    const g=String(group).trim();
+    if(!/^\d{2}$/.test(g)) return g;
+    if(g[0]==='0') return 'zéro '+frCardinal(Number(g[1]));
+    return frCardinal(Number(g));
+  }
+
   function ordinalTail(word){
     if(word==='trois') return 'troisième';
     if(word==='cinq') return 'cinquième';
@@ -257,10 +274,13 @@
   function normalize(s){
     return String(s).toLowerCase().trim().replace(/[’']/g,'').normalize('NFD').replace(/[\u0300-\u036f]/g,'').replace(/[^a-z0-9œ]/g,'').replace(/œ/g,'oe');
   }
-  function normalizeNumeric(s){ return String(s).trim().replace(/\s/g,'').replace(',','.').replace(/\.$/,''); }
+  function normalizeNumeric(s){
+    const v=String(s).trim().replace(/\s/g,'').replace(/\.$/,'');
+    return /^\d+$/.test(v) ? String(Number(v)) : v;
+  }
 
   function task(id, level, type, prompt, answer, opts={}){
-    return {id,level,type,prompt,answer,displayAnswer:opts.displayAnswer||answer,speakText:opts.speakText||answer,expect:opts.expect||'text',hint:opts.hint||'',forceChoice:!!opts.forceChoice};
+    return {id,level,type,prompt,answer,displayAnswer:opts.displayAnswer||answer,speakText:opts.speakText||answer,expect:opts.expect||'text',hint:opts.hint||'',forceChoice:!!opts.forceChoice,acceptedAnswers:opts.acceptedAnswers||[]};
   }
 
   function buildPools(){
@@ -294,8 +314,7 @@
     years.forEach(n=>pools[5].push(task(`L5-Y-${n}`,5,'Jahreszahl',`Wie sagst du das Jahr ${n} auf Französisch?`,frCardinal(n),{hint:'Nutze hier die Kardinalzahl.'})));
     const ids=[5,8,12,14,17,21,27,31,42,48,55,61,68,70,71,72,75,79,80,81,84,89,90,91,95,99,101,121,204,305];
     ids.forEach(n=>pools[5].push(task(`L5-RM-${n}`,5,'Zimmer / Linie',`Du brauchst Zimmer oder Linie ${n}. Wie sagst du die Nummer?`,frCardinal(n),{hint:'Konzentriere dich nur auf die Zahl.'})));
-    const pairs=['06 12 34 56 78','01 42 75 80 91','07 21 31 41 51','09 60 70 80 90','01 23 45 67 89','06 11 22 33 44','07 55 66 77 88','01 10 20 30 40','06 61 71 81 91','09 19 29 39 49'];
-    pairs.forEach((p,i)=>{ const ans=p.split(' ').map(x=>frCardinal(Number(x))).join(' · '); pools[5].push(task(`L5-PH-${i}`,5,'Telefon',`Telefonnummer ${p}: Sprich die fünf Zweiergruppen.`,ans,{hint:'Sprich jede Zweiergruppe als eigene Zahl.'})); });
+    PHONE_PAIRS.forEach((p,i)=>{ const ans=p.split(' ').map(phoneGroupToFrench).join(' · '); pools[5].push(task(`L5-PH-${i}`,5,'Telefon',`Telefonnummer ${p}: Sprich die fünf Zweiergruppen.`,ans,{hint:'Sprich jede Zweiergruppe als eigene Zahl; eine führende Null wird mitgesprochen.'})); });
     return pools;
   }
   const POOLS = buildPools();
@@ -325,14 +344,42 @@
     return picked;
   }
 
+  function answerKey(t,value){
+    return t.expect==='number' ? normalizeNumeric(value) : normalize(value);
+  }
   function distractorsFor(t){
-    const candidates=POOLS[t.level];
-    if(t.expect==='number'){
-      const correct=Number(t.answer); const nearby=uniq([correct-10,correct-2,correct-1,correct+1,correct+2,correct+10]).filter(n=>n>=0);
-      return shuffle(uniq([t.answer,...nearby.map(String)])).slice(0,4);
+    const correctKeys=new Set([t.answer,...(t.acceptedAnswers||[])].map(a=>answerKey(t,a)));
+    const correctKey=answerKey(t,t.answer);
+    const seen=new Set(correctKeys);
+    const wrong=[];
+    const addWrong=value=>{
+      const v=String(value), key=answerKey(t,v);
+      if(!key || seen.has(key) || correctKeys.has(key)) return;
+      seen.add(key); wrong.push(v);
+    };
+
+    // Erst fachlich nahe Optionen desselben Aufgabentyps verwenden.
+    const sameType=shuffle(POOLS[t.level].filter(x=>x.id!==t.id && x.expect===t.expect && x.type===t.type));
+    sameType.forEach(x=>addWrong(x.answer));
+    const sameLevel=shuffle(POOLS[t.level].filter(x=>x.id!==t.id && x.expect===t.expect && x.type!==t.type));
+    sameLevel.forEach(x=>addWrong(x.answer));
+
+    // Numerische Fallbacks: nur falsche, eindeutige und nicht-negative Werte.
+    if(t.expect==='number' && wrong.length<3){
+      const correct=Number(t.answer);
+      const min=t.level===3 ? 1 : 0;
+      [1,-1,2,-2,5,-5,10,-10,20,-20,50,-50,100,-100].forEach(d=>{
+        const n=correct+d; if(Number.isInteger(n) && n>=min) addWrong(String(n));
+      });
     }
-    const other=shuffle(candidates.filter(x=>x.id!==t.id && x.expect==='text')).slice(0,8).map(x=>x.answer);
-    return shuffle(uniq([t.answer,...other])).slice(0,4);
+
+    if(wrong.length<3) throw new Error(`Zu wenige eindeutige Distraktoren für ${t.id}`);
+    const options=shuffle([t.answer,...wrong.slice(0,3)]);
+    const correctCount=options.filter(o=>correctKeys.has(answerKey(t,o))).length;
+    if(options.length!==4 || new Set(options.map(o=>answerKey(t,o))).size!==4 || correctCount!==1){
+      throw new Error(`Ungültige Multiple-Choice-Optionen für ${t.id}`);
+    }
+    return options;
   }
 
   function answerModeFor(t){
@@ -353,8 +400,74 @@
   }
 
   function checkAnswer(task, value){
-    if(task.expect==='number') return normalizeNumeric(value)===normalizeNumeric(task.answer);
-    return normalize(value)===normalize(task.answer);
+    const key=answerKey(task,value);
+    return [task.answer,...(task.acceptedAnswers||[])].some(a=>answerKey(task,a)===key);
+  }
+
+  function validateContent(){
+    const errors=[];
+    const ids=new Set();
+    const fail=(id,msg)=>errors.push(`${id}: ${msg}`);
+    for(const t of ALL_TASKS){
+      if(ids.has(t.id)) fail(t.id,'doppelte Aufgaben-ID'); else ids.add(t.id);
+      if(!String(t.answer).trim()) fail(t.id,'leere Lösung');
+      if(t.expect==='number' && !/^\d+$/.test(String(t.answer))) fail(t.id,'numerische Lösung ist keine ganze Zahl');
+
+      let m;
+      if((m=t.id.match(/^L1-W-(\d+)$/)) || (m=t.id.match(/^L2-W-(\d+)$/))){
+        if(t.answer!==frCardinal(Number(m[1]))) fail(t.id,'Kardinalzahl stimmt nicht mit Generator überein');
+      } else if((m=t.id.match(/^L1-R-(\d+)$/)) || (m=t.id.match(/^L2-R-(\d+)$/))){
+        const n=Number(m[1]);
+        if(t.answer!==String(n) || t.prompt!==frCardinal(n)) fail(t.id,'Erkennungsaufgabe ist inkonsistent');
+      } else if((m=t.id.match(/^L3-W-(\d+)$/))){
+        if(t.answer!==frOrdinal(Number(m[1]))) fail(t.id,'Ordnungszahl stimmt nicht mit Generator überein');
+      } else if((m=t.id.match(/^L3-R-(\d+)$/))){
+        const n=Number(m[1]);
+        if(t.answer!==String(n) || t.prompt!==frOrdinal(n)) fail(t.id,'Ordnungszahl-Erkennung ist inkonsistent');
+      } else if((m=t.id.match(/^L4-H-(\d+)$/))){
+        const n=Number(m[1]);
+        if(t.answer!==String(n) || t.speakText!==frCardinal(n)) fail(t.id,'Höraufgabe ist inkonsistent');
+      } else if((m=t.id.match(/^L5-P-(\d+)$/))){
+        const n=Number(m[1]), expected=`${frCardinal(n)} ${n===1?'euro':'euros'}`;
+        if(t.answer!==expected) fail(t.id,'Preisform stimmt nicht');
+      } else if((m=t.id.match(/^L5-T-(\d{2}:\d{2})$/))){
+        const [h,min]=m[1].split(':').map(Number);
+        const expected=`${frCardinal(h)} heures${min?' '+frCardinal(min):''}`;
+        if(t.answer!==expected) fail(t.id,'Uhrzeitform stimmt nicht');
+      } else if((m=t.id.match(/^L5-Y-(\d+)$/))){
+        if(t.answer!==frCardinal(Number(m[1]))) fail(t.id,'Jahreszahl stimmt nicht');
+      } else if((m=t.id.match(/^L5-RM-(\d+)$/))){
+        if(t.answer!==frCardinal(Number(m[1]))) fail(t.id,'Zimmer-/Liniennummer stimmt nicht');
+      } else if((m=t.id.match(/^L5-PH-(\d+)$/))){
+        const p=PHONE_PAIRS[Number(m[1])];
+        const expected=p && p.split(' ').map(phoneGroupToFrench).join(' · ');
+        if(!p || t.answer!==expected) fail(t.id,'Telefonnummer stimmt nicht');
+      }
+
+      if(t.level!==4){
+        try{
+          for(let i=0;i<5;i++){
+            const opts=distractorsFor(t);
+            const keys=opts.map(o=>answerKey(t,o));
+            if(opts.length!==4) fail(t.id,'Multiple Choice hat nicht vier Optionen');
+            if(new Set(keys).size!==4) fail(t.id,'Multiple Choice enthält doppelte Optionen');
+            if(opts.filter(o=>checkAnswer(t,o)).length!==1) fail(t.id,'Multiple Choice enthält nicht genau eine richtige Antwort');
+          }
+        }catch(e){ fail(t.id,e.message); }
+      }
+    }
+
+    const cardinalCases={
+      0:'zéro',1:'un',17:'dix-sept',21:'vingt et un',61:'soixante et un',70:'soixante-dix',71:'soixante et onze',72:'soixante-douze',
+      79:'soixante-dix-neuf',80:'quatre-vingts',81:'quatre-vingt-un',90:'quatre-vingt-dix',91:'quatre-vingt-onze',99:'quatre-vingt-dix-neuf',
+      100:'cent',101:'cent un',180:'cent quatre-vingts',200:'deux cents',201:'deux cent un',280:'deux cent quatre-vingts',281:'deux cent quatre-vingt-un',
+      999:'neuf cent quatre-vingt-dix-neuf',1000:'mille',1001:'mille un',2000:'deux mille',2026:'deux mille vingt-six',10000:'dix mille'
+    };
+    Object.entries(cardinalCases).forEach(([n,expected])=>{if(frCardinal(Number(n))!==expected) fail(`CARD-${n}`,`erwartet „${expected}“, erhalten „${frCardinal(Number(n))}“`);});
+    const ordinalCases={1:'premier',2:'deuxième',3:'troisième',4:'quatrième',5:'cinquième',9:'neuvième',21:'vingt et unième',71:'soixante et onzième',80:'quatre-vingtième',81:'quatre-vingt-unième',91:'quatre-vingt-onzième',100:'centième'};
+    Object.entries(ordinalCases).forEach(([n,expected])=>{if(frOrdinal(Number(n))!==expected) fail(`ORD-${n}`,`erwartet „${expected}“, erhalten „${frOrdinal(Number(n))}“`);});
+
+    return {ok:errors.length===0,errors,checked:ALL_TASKS.length};
   }
 
   function startSession(level){
@@ -446,6 +559,12 @@
     document.getElementById('sessionSize').value=String(db.settings.sessionSize);
     document.getElementById('answerMode').value=db.settings.answerMode;
     document.getElementById('autoSpeak').value=db.settings.autoSpeak;
+    const status=document.getElementById('integrityStatus'), detail=document.getElementById('integrityDetail');
+    if(status&&detail){
+      status.textContent=CONTENT_CHECK.ok?'✓ OK':'⚠ Fehler';
+      status.style.color=CONTENT_CHECK.ok?'var(--good)':'var(--bad)';
+      detail.textContent=CONTENT_CHECK.ok ? `${CONTENT_CHECK.checked} Aufgaben + Multiple-Choice-Optionen automatisch geprüft.` : CONTENT_CHECK.errors.slice(0,3).join(' · ');
+    }
   }
   function showView(name){
     ['home','train','stats','settings'].forEach(v=>document.getElementById(v+'View').classList.toggle('hidden',v!==name));
@@ -456,6 +575,9 @@
   function toast(msg){ const x=document.getElementById('toast'); x.textContent=msg; x.classList.add('show'); setTimeout(()=>x.classList.remove('show'),2200); }
   function escapeHtml(s){return String(s).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]))}
   function escapeAttr(s){return escapeHtml(s).replace(/'/g,'&#39;')}
+
+  const CONTENT_CHECK=validateContent();
+  if(!CONTENT_CHECK.ok) console.error('Nombres FR – Inhaltsprüfung fehlgeschlagen', CONTENT_CHECK.errors);
 
   document.querySelectorAll('.navbtn').forEach(b=>b.onclick=()=>showView(b.dataset.view));
   document.getElementById('backHome').onclick=()=>showView('home');
